@@ -1,11 +1,11 @@
-const WebSocket = require('ws');
-const PORT = process.env.PORT || 8080;
+const WebSocket = require("ws");
+const server = new WebSocket.Server({ port: 8080 });
 
-const server = new WebSocket.Server({ port: PORT });
-console.log("Servidor WebSocket iniciado en puerto 8080");
+console.log("Servidor WebSocket iniciando en puerto 8080");
 
 // --- VARIABLES GLOBALES ---
 let players = [];
+let playersAwaiting = [];
 let next_id = 1;
 
 let ball = { x: 320, y: 240, vx: 220, vy: 180 };
@@ -19,15 +19,48 @@ function broadcast(obj) {
     for (const p of players) {
         p.send(data);
     }
+    for (const pa of playersAwaiting) {
+        data.type = "handleOtherPos"
+        pa.send(data);
+    }
+}
+
+function checkFullPlayers(id) {
+    const players_buffer = players.filter((p) => p.id !== id);
+    console.log(`Players: ${players}, ${players_buffer}: players_buffer`);
+    if (players_buffer.length < 2) {
+        console.log(`La sala no está llena, hay ${players_buffer.length} jugadores activos`);
+        return false;
+    } else {
+        console.log(`La sala está llena, hay ${players_buffer.length} jugadores activos, no puedes entrar`);
+        return true;
+    }
+}
+
+function getNextPlayerAwaiting() {
+    let times = [];
+    const players_buffer = [];
+    playersAwaiting.forEach((pw) => {
+        times.push(pw.now);
+        players_buffer.push(pw);
+    });
+    console.log(`Actual tiempo: ${times}`);
+    times = times.sort();
+    console.log(`Tiempo organizado: ${times}`);
+    const time = times[0];
+    let player_selected = null;
+    players_buffer.forEach((pb) => {
+        console.log(`jugador en buffer con now: ${pb.now}`);
+        if (pb.now === time) {
+            player_selected = pb;
+        }
+    });
+    console.log(`Jugador escogido: ${player_selected}`);
+    console.log(`Tiempo escogido: ${time}`);
 }
 
 // --- NUEVA CONEXIÓN ---
 server.on("connection", (ws) => {
-    if (players.length >= 2) {
-        ws.send(JSON.stringify({ type: "full" }));
-        ws.close();
-        return;
-    }
 
     const id = next_id++;
     ws.id = id;
@@ -40,14 +73,40 @@ server.on("connection", (ws) => {
 
     ws.on("message", (msg) => {
         const data = JSON.parse(msg);
-        if (data.type === "move") {
-            ws.y = data.y;
+        switch (data.type) {
+            case "move": 
+                ws.y = data.y,
+                ws.ping = data.time 
+                ws.send(JSON.stringify({
+                type: "update_ping",
+                ping: ws.ping })); 
+                break;
+            case "check_players":
+                ws.send(JSON.stringify({
+                    type: "check_players_received",
+                    full: checkFullPlayers(ws.id)
+                }));
+                break;
+            case "add_playerAwaiting":
+                const now = Date.now();
+                ws.now = now;
+                playersAwaiting.push(ws);
+                ws.send(JSON.stringify({
+                    type: "add_playerAccepted"
+                }));
+                break;
+            case "next_player":
+                getNextPlayerAwaiting();
         }
     });
 
     ws.on("close", () => {
         console.log(`Jugador ${id} desconectado`);
         players = players.filter((p) => p !== ws);
+        // Resetear ID
+        if (players.length === 0) {
+            next_id++;
+        }
     });
 });
 
@@ -63,55 +122,31 @@ setInterval(() => {
         // Rebote arriba/abajo
         if (ball.y < 0 || ball.y > HEIGHT) ball.vy *= -1;
 
-        // Colisión con paletas
+        // Colision con paletas
         for (let i = 0; i < 2; i++) {
             const paddleX = i === 0 ? 40 : WIDTH - 40;
             const paddleY = players[i].y ?? HEIGHT / 2;
-            
+
             if (
                 Math.abs(ball.x - paddleX) < 10 &&
                 Math.abs(ball.y - paddleY) < 50
             ) {
                 ball.vx *= -1;
-                // pequeño ajuste de posición para evitar rebote doble
+                // pequeño ajuste de posicion para evitar rebote doble
                 ball.x += (i === 0 ? 1 : -1) * 5;
             }
         }
 
-        // Reiniciar si sale del campo
+        // reiniciar si sale del campo
         if (ball.x < 0 || ball.x > WIDTH) {
-            let target_id = 0;
-            // Comprobar a quien añadirle los puntos
-            if (ball.x < 0) {
-                target_id = 0;
-            } else if (ball.x > WIDTH) {
-                target_id = 1;
-            }
-
-            let vy_random = Number(Math.random());
-
-            switch (vy_random) {
-                case 0:
-                    vy_random = -1;
-                    break;
-                case 1:
-                    vy_random = 1;
-                    break;
-            }
-
-            ball = { x: WIDTH / 2, y: HEIGHT / 2, vx: 220 * (Math.random() < 0.5 ? 1 : -1), vy: 180 * vy_random };
-            broadcast({
-                type: "add_score",
-                score: 150,
-                id: target_id
-            });
+            ball = { x: WIDTH / 2, y: HEIGHT / 2, vx: 220 * (Math.random() < 0.5 ? 1 : -1), vy: 180 };
         }
     }
 
-    // Enviar estado global
+    // Enviar estado global 
     broadcast({
         type: "state",
         ball,
-        players: players.map((p) => ({ id: p.id, y: p.y }))
+        players: players.map((p) => ({ id: p.id, y: p.y })),
     });
 }, 1000 / FPS);
